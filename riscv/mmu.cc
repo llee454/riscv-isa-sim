@@ -46,8 +46,13 @@ static void throw_access_exception(reg_t addr, access_type type)
 
 reg_t mmu_t::translate(reg_t addr, reg_t len, access_type type)
 {
-  if (!proc)
+  printf ("[translate] addr: %lx\n", addr);
+
+  if (!proc) {
+    printf ("[translate] physical address: %lx\n", addr);
+    fflush (stdout);
     return addr;
+  }
 
   reg_t mode = proc->state.prv;
   if (type != FETCH) {
@@ -56,6 +61,8 @@ reg_t mmu_t::translate(reg_t addr, reg_t len, access_type type)
   }
 
   reg_t paddr = walk(addr, type, mode) | (addr & (PGSIZE-1));
+  printf ("[translate] physical address: %lx\n", paddr);
+  fflush (stdout);
   if (!pmp_ok(paddr, len, type, mode))
     throw_access_exception(addr, type);
   return paddr;
@@ -262,9 +269,15 @@ reg_t mmu_t::pmp_homogeneous(reg_t addr, reg_t len)
 
 reg_t mmu_t::walk(reg_t addr, access_type type, reg_t mode)
 {
+  printf ("[walk] addr: %lx\n", addr);
   vm_info vm = decode_vm_info(proc->max_xlen, mode, proc->get_state()->satp);
-  if (vm.levels == 0)
+  printf ("[walk] vm.idxbits : %lx\n", vm.idxbits);
+  if (vm.levels == 0) {
+    reg_t addr_temp = addr & ((reg_t(2) << (proc->xlen-1))-1);
+    printf ("[walk] vm levels equals 0: %lx\n", addr_temp);
+    fflush (stdout);
     return addr & ((reg_t(2) << (proc->xlen-1))-1); // zero-extend from xlen
+  }
 
   bool s_mode = mode == PRV_S;
   bool sum = get_field(proc->state.mstatus, MSTATUS_SUM);
@@ -284,46 +297,68 @@ reg_t mmu_t::walk(reg_t addr, access_type type, reg_t mode)
 
     // check that physical address of PTE is legal
     auto pte_paddr = base + idx * vm.ptesize;
+    printf ("[walk] pte addr: %lx\n", pte_paddr);
     auto ppte = sim->addr_to_mem(pte_paddr);
-    if (!ppte || !pmp_ok(pte_paddr, vm.ptesize, LOAD, PRV_S))
+    if (!ppte || !pmp_ok(pte_paddr, vm.ptesize, LOAD, PRV_S)) {
+      printf ("[walk] pmp access exception\n");
+      fflush (stdout);
       throw_access_exception(addr, type);
+    }
 
     reg_t pte = vm.ptesize == 4 ? *(uint32_t*)ppte : *(uint64_t*)ppte;
     reg_t ppn = pte >> PTE_PPN_SHIFT;
 
+    printf ("[walk] pte: %lx\n", pte);
+    printf ("[walk] i: %x\n", i);
+    printf ("[walk] ppn: %lx\n", ppn);
+    printf ("[walk] ptshift: %i alignement mask: %x\n", ptshift, ((reg_t(1) << ptshift) - 1));
+
     if (PTE_TABLE(pte)) { // next level of page table
       base = ppn << PGSHIFT;
     } else if ((pte & PTE_U) ? s_mode && (type == FETCH || !sum) : !s_mode) {
+      printf ("[walk] trying to execute user mode while in supervisor mode");
       break;
     } else if (!(pte & PTE_V) || (!(pte & PTE_R) && (pte & PTE_W))) {
+      printf ("[walk] page table not valid");
       break;
     } else if (type == FETCH ? !(pte & PTE_X) :
                type == LOAD ?  !(pte & PTE_R) && !(mxr && (pte & PTE_X)) :
                                !((pte & PTE_R) && (pte & PTE_W))) {
+      printf ("[walk] page table entry not valid");
       break;
     } else if ((ppn & ((reg_t(1) << ptshift) - 1)) != 0) {
+      printf ("[walk] page table entry is not aligned.");
       break;
     } else {
       reg_t ad = PTE_A | ((type == STORE) * PTE_D);
 #ifdef RISCV_ENABLE_DIRTY
       // set accessed and possibly dirty bits.
       if ((pte & ad) != ad) {
-        if (!pmp_ok(pte_paddr, vm.ptesize, STORE, PRV_S))
+        if (!pmp_ok(pte_paddr, vm.ptesize, STORE, PRV_S)) {
+          printf ("[walk] pmp access exception 2\n");
+          fflush (stdout);
           throw_access_exception(addr, type);
+        }
         *(uint32_t*)ppte |= ad;
       }
 #else
       // take exception if access or possibly dirty bit is not set.
-      if ((pte & ad) != ad)
+      if ((pte & ad) != ad) {
+        printf ("[walk] page table entry dirty or something like that.\n");
         break;
+      }
 #endif
       // for superpage mappings, make a fake leaf PTE for the TLB's benefit.
       reg_t vpn = addr >> PGSHIFT;
       reg_t value = (ppn | (vpn & ((reg_t(1) << ptshift) - 1))) << PGSHIFT;
+      printf ("[walk] value: %lx\n", value);
+      fflush (stdout);
       return value;
     }
   }
 
+  printf ("[walk] final exceptions\n");
+  fflush (stdout);
   switch (type) {
     case FETCH: throw trap_instruction_page_fault(addr);
     case LOAD: throw trap_load_page_fault(addr);
